@@ -10,7 +10,7 @@ class RecordType(Enum):
     NS = 2
     CNAME = 5
     SOA = 6
-    #MX = 15
+    MX = 15
     #TXT = 16
     #AAAA = 28
     #PTR = 12
@@ -54,6 +54,17 @@ class Server:
         
         self.send(addr, response)
     
+    #Recursively goes through zone file CNAME records to find the correct A record if one exists, otherwise returns the CNAME record
+    #Returns response object that may or may not be altered depending if we find CNAME records
+    def recursive_cname_query(self, qname, qtype, records,previous_cname_query,response):
+        response.add_answer(previous_cname_query)
+        for record in records:
+            if record.rname == qname and record.rtype == qtype:
+                response.add_answer(record)
+            elif record.rname == qname and record.rtype == RecordType.CNAME.value:
+                response = self.recursive_cname_query(record.rdata.label, qtype, records,record,response)
+        return response
+
     #given a request header we construct the correst response object and return it
     def determine_response(self, request, incoming_ip):
         #If request is for domain we are authoritative over, return the correct response
@@ -74,11 +85,18 @@ class Server:
             for record in records:
                 if record.rname == qname and record.rtype == qtype:
                     response.add_answer(record)
+                elif record.rname == qname and record.rtype == RecordType.CNAME.value:
+                    next_record_in_cname_chain = record.rdata.label
+                    response = self.recursive_cname_query(next_record_in_cname_chain, qtype, records,record,response)
+            
+            for record in records:
+                if record.rtype == RecordType.NS.value and record.rname == self.domain:
+                    response.add_auth(record)
         elif is_local:
             #forward the request to the root server and return the response
             pass
         else:
-            # Reject the request
+            response.header.rcode = 5 #REFUSED
             pass
         return response
 
