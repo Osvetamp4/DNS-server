@@ -1,12 +1,25 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
+from enum import Enum
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A
+
+class RecordType(Enum):
+    """DNS Record Type Numbers"""
+    A = 1
+    NS = 2
+    CNAME = 5
+    SOA = 6
+    #MX = 15
+    #TXT = 16
+    #AAAA = 28
+    #PTR = 12
+    #SRV = 33
 
 class Server:
     def __init__(self, root_ip, domain, port):
         self.root_ip = root_ip
-        self.domain = domain.split("/")[1].removesuffix(".zone")
+        self.domain = domain.split("/")[1].removesuffix(".zone") + "."
         self.zone_path = domain
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -36,38 +49,41 @@ class Server:
 
         # YOU WILL NEED TO ACTUALLY DO SOMETHING SMART HERE
         # WE ARE JUST REPLYING WITH A FIXED RESPONSE
-        response = request.reply()
-        response.add_answer(RR("abc.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=60))       
+        response = self.determine_response(request, incoming_ip)
+        #response.add_answer(RR("abc.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=60))       
         
         self.send(addr, response)
     
-    #given a request header we determine the correct response back to client
+    #given a request header we construct the correst response object and return it
     def determine_response(self, request, incoming_ip):
         #If request is for domain we are authoritative over, return the correct response
         #If request is for a domain we are not authoritative over, then determine if client is local, if is then forward request to root server, else reject
-        qname = str(request.q.qname)
-        is_authoritative = qname.endswith(self.domain_name) or qname.endswith("." + self.domain_name)
-        is_local = incoming_ip == "127.0.0.1"
+        qname = request.q.qname
+        qtype = request.q.qtype
+        is_authoritative = str(qname).endswith(self.domain) or str(qname).endswith("." + self.domain)
+        is_local = (incoming_ip == "127.0.0.1")
         response = request.reply()
+        
         if is_authoritative:
-            # Return the correct response for the authoritative domain
+            #do this only if this dns server is authoritative for the req domain
             response.header.aa = 1
             with open(self.zone_path, "r") as f:
                 zone_text = f.read()
             records = list(RR.fromZone(zone_text))
+
+            for record in records:
+                if record.rname == qname and record.rtype == qtype:
+                    response.add_answer(record)
         elif is_local:
-            # Forward the request to the root server and return the response
+            #forward the request to the root server and return the response
             pass
         else:
             # Reject the request
             pass
+        return response
 
     def run(self):
         seq = 0
-        print(self.domain)
-        print(self.domain_name)
-        print(self.port)
-        print(self.root_ip)
 
         while True:
             socks = select.select([self.socket], [], [], 0.1)[0]
