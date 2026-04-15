@@ -52,8 +52,9 @@ class Server:
         if is_authoritative:
             # Return the correct response for the authoritative domain
             response.header.aa = 1
-            response.add_answer
-            pass
+            with open(self.zone_path, "r") as f:
+                zone_text = f.read()
+            records = list(RR.fromZone(zone_text))
         elif is_local:
             # Forward the request to the root server and return the response
             pass
@@ -67,6 +68,7 @@ class Server:
         print(self.domain_name)
         print(self.port)
         print(self.root_ip)
+
         while True:
             socks = select.select([self.socket], [], [], 0.1)[0]
             for conn in socks:
