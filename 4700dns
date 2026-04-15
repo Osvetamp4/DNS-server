@@ -56,13 +56,14 @@ class Server:
     
     #Recursively goes through zone file CNAME records to find the correct A record if one exists, otherwise returns the CNAME record
     #Returns response object that may or may not be altered depending if we find CNAME records
-    def recursive_cname_query(self, qname, qtype, records,previous_cname_query,response):
+    def recursive_cname_query(self, qname, qtype, records,previous_cname_query,response,glue_time = False):
         response.add_answer(previous_cname_query)
         for record in records:
             if record.rname == qname and record.rtype == qtype:
+                #add smthn here to make empty_a_record false in determine_response
                 response.add_answer(record)
             elif record.rname == qname and record.rtype == RecordType.CNAME.value:
-                response = self.recursive_cname_query(record.rdata.label, qtype, records,record,response)
+                response = self.recursive_cname_query(record.rdata.label, qtype, records,record,response,glue_time)
         return response
 
     #given a request header we construct the correst response object and return it
@@ -73,6 +74,8 @@ class Server:
         qtype = request.q.qtype
         is_authoritative = str(qname).endswith(self.domain) or str(qname).endswith("." + self.domain)
         is_local = (incoming_ip == "127.0.0.1")
+        empty_A_record = True
+        empty_NS_record = True
         response = request.reply()
         
         if is_authoritative:
@@ -82,16 +85,26 @@ class Server:
                 zone_text = f.read()
             records = list(RR.fromZone(zone_text))
 
+            #Scan for NS records
             for record in records:
-                if record.rname == qname and record.rtype == qtype:
-                    response.add_answer(record)
-                elif record.rname == qname and record.rtype == RecordType.CNAME.value:
-                    next_record_in_cname_chain = record.rdata.label
-                    response = self.recursive_cname_query(next_record_in_cname_chain, qtype, records,record,response)
+                if record.rname == qname and record.rtype == RecordType.NS.value:
+                    empty_NS_record = False
+                    if qtype == RecordType.A.value:
+                        response.add_auth(record)
+                    elif qtype == RecordType.NS.value:
+                        response.add_answer(record)
+
+            #WIP Make sure ts determines if we do glue records or answer sections instead.
+            for record in records:
+                if record.rname == qname:
+                    if record.rtype == RecordType.A.value:
+                        empty_A_record = False
+                        response.add_answer(record)
+                    elif record.rtype == RecordType.CNAME.value:
+                        next_record_in_cname_chain = record.rdata.label
+                        response = self.recursive_cname_query(next_record_in_cname_chain, qtype, records,record,response)
             
-            for record in records:
-                if record.rtype == RecordType.NS.value and record.rname == self.domain:
-                    response.add_auth(record)
+
         elif is_local:
             #forward the request to the root server and return the response
             pass
