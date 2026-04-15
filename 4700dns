@@ -6,7 +6,7 @@ from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A
 class Server:
     def __init__(self, root_ip, domain, port):
         self.root_ip = root_ip
-        self.domain = domain
+        self.domain = domain.split("/")[1].removesuffix(".zone")
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(("0.0.0.0", port))
@@ -24,10 +24,14 @@ class Server:
 
     def recv(self, socket):
         data, addr = socket.recvfrom(65535)
+        incoming_ip, incoming_port = addr
+        print("addr", addr)
 
         # Unpack the DNS request
         request = DNSRecord.parse(data)
-        self.log("Received message:\n%s" % request)
+        #self.log("Received message:\n%s" % request)
+        self.log("Received message")
+        print(request)
 
         # YOU WILL NEED TO ACTUALLY DO SOMETHING SMART HERE
         # WE ARE JUST REPLYING WITH A FIXED RESPONSE
@@ -35,9 +39,29 @@ class Server:
         response.add_answer(RR("abc.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=60))       
         
         self.send(addr, response)
+    
+    #given a request header we determine the correct response back to client
+    def determine_response(self, qname, incoming_ip):
+        #If request is for domain we are authoritative over, return the correct response
+        #If request is for a domain we are not authoritative over, then determine if client is local, if is then forward request to root server, else reject
+        is_authoritative = qname.endswith(self.domain_name) or qname.endswith("." + self.domain_name)
+        is_local = incoming_ip == "127.0.0.1"
+        if is_authoritative:
+            # Return the correct response for the authoritative domain
+            pass
+        elif is_local:
+            # Forward the request to the root server and return the response
+            pass
+        else:
+            # Reject the request
+            pass
 
     def run(self):
         seq = 0
+        print(self.domain)
+        print(self.domain_name)
+        print(self.port)
+        print(self.root_ip)
         while True:
             socks = select.select([self.socket], [], [], 0.1)[0]
             for conn in socks:
