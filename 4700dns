@@ -69,6 +69,7 @@ class Server:
     
     #Recursively goes through zone file CNAME records to find the correct A record if one exists, otherwise returns the CNAME record
     #Returns response object that may or may not be altered depending if we find CNAME records
+    #REWORK THIS FUNCTION TO BE MORE CLEAN AND EASIER TO UNDERSTAND
     def recursive_cname_query(self, qname, qtype, records,previous_cname_query,response,glue_time = False):
         response.add_answer(previous_cname_query)
         for record in records:
