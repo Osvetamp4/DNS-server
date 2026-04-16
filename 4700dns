@@ -4,6 +4,11 @@ import argparse, socket, time, json, select, struct, sys, math
 from enum import Enum
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A
 
+class DNSRecordPair:
+    def __init__(self, domain_name, record):
+        self.domain_name = domain_name
+        self.record = record
+
 class RecordType(Enum):
     """DNS Record Type Numbers"""
     A = 1
@@ -11,16 +16,24 @@ class RecordType(Enum):
     CNAME = 5
     SOA = 6
     MX = 15
-    #TXT = 16
-    #AAAA = 28
-    #PTR = 12
-    #SRV = 33
+    TXT = 16
 
 class Server:
     def __init__(self, root_ip, domain, port):
         self.root_ip = root_ip
         self.domain = domain.split("/")[1].removesuffix(".zone") + "."
         self.zone_path = domain
+
+        with open(self.zone_path, "r") as f:
+                zone_text = f.read()
+        recordList = list(RR.fromZone(zone_text))
+        self.records = dict()
+        values = [r.value for r in RecordType]
+        for value in values:
+            self.records[value] = []
+        for record in recordList:
+            DNSRecordPair_Object = DNSRecordPair(record.rname, record)
+            self.records[record.rtype].append(DNSRecordPair_Object)
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(("0.0.0.0", port))
@@ -74,37 +87,29 @@ class Server:
         qtype = request.q.qtype
         is_authoritative = str(qname).endswith(self.domain) or str(qname).endswith("." + self.domain)
         is_local = (incoming_ip == "127.0.0.1")
-        empty_A_record = True
-        empty_NS_record = True
         response = request.reply()
         
         if is_authoritative:
             #do this only if this dns server is authoritative for the req domain
             response.header.aa = 1
-            with open(self.zone_path, "r") as f:
-                zone_text = f.read()
-            records = list(RR.fromZone(zone_text))
-
-            #Scan for NS records
-            for record in records:
-                if record.rname == qname and record.rtype == RecordType.NS.value:
-                    empty_NS_record = False
-                    if qtype == RecordType.A.value:
-                        response.add_auth(record)
-                    elif qtype == RecordType.NS.value:
-                        response.add_answer(record)
-
-            #WIP Make sure ts determines if we do glue records or answer sections instead.
-            for record in records:
-                if record.rname == qname:
-                    if record.rtype == RecordType.A.value:
-                        empty_A_record = False
-                        response.add_answer(record)
-                    elif record.rtype == RecordType.CNAME.value:
-                        next_record_in_cname_chain = record.rdata.label
-                        response = self.recursive_cname_query(next_record_in_cname_chain, qtype, records,record,response)
             
+            relevant_NS_records = [record for record in self.records[RecordType.NS.value] if record.rname == qname]
+            relevant_A_records = [record for record in self.records[RecordType.A.value] if record.rname == qname]
 
+            if qtype == RecordType.NS.value:
+                for NS_record in relevant_NS_records:
+                    response.add_answer(NS_record)
+                for A_record in relevant_A_records:
+                    response.add_ar(A_record)
+            elif qtype == RecordType.A.value:
+                if len(relevant_NS_records) > 0:
+                    for NS_record in relevant_NS_records:
+                        response.add_auth(NS_record)
+                else:
+                    for A_record in relevant_A_records:
+                        response.add_answer(A_record)
+                for A_record in relevant_A_records:
+                        response.add_ar(A_record)
         elif is_local:
             #forward the request to the root server and return the response
             pass
