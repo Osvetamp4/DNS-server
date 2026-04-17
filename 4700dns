@@ -26,6 +26,7 @@ class Server:
 
         with open(self.zone_path, "r") as f:
                 zone_text = f.read()
+                print(zone_text)
         recordList = list(RR.fromZone(zone_text))
         self.recordList = recordList
         self.records = dict()
@@ -35,6 +36,9 @@ class Server:
         for record in recordList:
             DNSRecordPair_Object = DNSRecordPair(record.rname, record)
             self.records[record.rtype].append(record)
+        
+
+        
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(("0.0.0.0", port))
@@ -84,8 +88,14 @@ class Server:
             if glue == False:
                 response.add_answer(current_CNAME_record)
             next_record = self.find_records(current_CNAME_record.rdata.label)
-            if len(next_record) == 1 and next_record[0].rtype == RecordType.CNAME.value:
+            if len(next_record) == 1 and next_record[0].rtype == RecordType.CNAME.value: #The next chained record is a CNAME record
                 return self.recursive_cname_query(response, next_record[0],glue)
+            else: #The next chained record is actually A records
+                for record in next_record:
+                    if glue == False:
+                        response.add_answer(record)
+                    elif glue == True:
+                        response.add_ar(record)
         elif current_CNAME_record.rtype == RecordType.A.value: #we have reached the end of the CNAMe chain and arrived at an A record
             if glue == False:
                 response.add_answer(current_CNAME_record)
@@ -110,6 +120,7 @@ class Server:
             relevant_NS_records = [record for record in self.records[RecordType.NS.value] if record.rname == qname]
             relevant_A_records = [record for record in self.records[RecordType.A.value] if record.rname == qname]
             relevant_CNAME_records = [record for record in self.records[RecordType.CNAME.value] if record.rname == qname]
+            relevant_MX_records = [record for record in self.records[RecordType.MX.value] if record.rname == qname]
 
             if qtype == RecordType.NS.value:
                 for NS_record in relevant_NS_records:
@@ -139,6 +150,9 @@ class Server:
                             response = self.recursive_cname_query(response,CNAME_record,False)
                     else:#We have found no relevant NS record or A records for this A record query
                         response.header.rcode = 3 #NXDOMAIN No A records exist for the domain, but we are authoritative so we return NXDOMAIN
+            elif qtype == RecordType.MX.value:
+                for MX_record in relevant_MX_records:
+                    response.add_answer(MX_record)
         elif is_local:
             #forward the request to the root server and return the response
             pass
