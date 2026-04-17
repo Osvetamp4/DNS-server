@@ -111,17 +111,21 @@ class Server:
                     response.add_answer(NS_record)
                 for A_record in relevant_A_records:
                     response.add_ar(A_record)
+                #add CNAME resolving search
             elif qtype == RecordType.A.value:
-                if len(relevant_NS_records) > 0:
+                if len(relevant_NS_records) > 0: #If there are relevant NS records for this A record query
                     for NS_record in relevant_NS_records:
                         response.add_auth(NS_record)
                     for A_record in relevant_A_records:
                         response.add_ar(A_record)
-                else:
-                    if len(relevant_A_records) > 0:
+                    #Add CNAMe record search but with glue
+                else: #If there are no relevant NS records for this A record query
+                    if len(relevant_A_records) > 0: #If there are relevant A records for this A record query
                         for A_record in relevant_A_records:
                             response.add_answer(A_record)
-                    else:
+                        #add own NS records, NOT relevant NS records, it is optional but prolly do it later
+                    #Also search for CNAMe record search
+                    else:#We have found no relevant NS record or A records for this A record query
                         response.header.rcode = 3 #NXDOMAIN No A records exist for the domain, but we are authoritative so we return NXDOMAIN
         elif is_local:
             #forward the request to the root server and return the response
