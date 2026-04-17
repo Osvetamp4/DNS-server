@@ -86,6 +86,11 @@ class Server:
             next_record = self.find_records(current_CNAME_record.rdata.label)
             if len(next_record) == 1 and next_record[0].rtype == RecordType.CNAME.value:
                 return self.recursive_cname_query(response, next_record[0],glue)
+        elif current_CNAME_record.rtype == RecordType.A.value: #we have reached the end of the CNAMe chain and arrived at an A record
+            if glue == False:
+                response.add_answer(current_CNAME_record)
+            elif glue == True:
+                response.add_ar(current_CNAME_record)
         return response
 
     #given a request header we construct the correst response object and return it
@@ -112,6 +117,8 @@ class Server:
                 for A_record in relevant_A_records:
                     response.add_ar(A_record)
                 #add CNAME resolving search
+                for CNAME_record in relevant_CNAME_records:
+                    self.recursive_cname_query(response,CNAME_record,True)
             elif qtype == RecordType.A.value:
                 if len(relevant_NS_records) > 0: #If there are relevant NS records for this A record query
                     for NS_record in relevant_NS_records:
