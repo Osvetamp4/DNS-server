@@ -27,13 +27,14 @@ class Server:
         with open(self.zone_path, "r") as f:
                 zone_text = f.read()
         recordList = list(RR.fromZone(zone_text))
+        self.recordList = recordList
         self.records = dict()
         values = [r.value for r in RecordType]
         for value in values:
             self.records[value] = []
         for record in recordList:
             DNSRecordPair_Object = DNSRecordPair(record.rname, record)
-            self.records[record.rtype].append(DNSRecordPair_Object)
+            self.records[record.rtype].append(record)
 
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(("0.0.0.0", port))
@@ -66,18 +67,25 @@ class Server:
         #response.add_answer(RR("abc.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=60))       
         
         self.send(addr, response)
+    #returns a mini dictionary of records
+    def find_records(self,domain_name):
+        found_records = []
+        for record in self.recordList:
+            if record.rname == domain_name:
+                found_records.append(record)
+        return found_records
     
     #Recursively goes through zone file CNAME records to find the correct A record if one exists, otherwise returns the CNAME record
-    #Returns response object that may or may not be altered depending if we find CNAME records
-    #REWORK THIS FUNCTION TO BE MORE CLEAN AND EASIER TO UNDERSTAND
-    def recursive_cname_query(self, qname, qtype, records,previous_cname_query,response,glue_time = False):
-        response.add_answer(previous_cname_query)
-        for record in records:
-            if record.rname == qname and record.rtype == qtype:
-                #add smthn here to make empty_a_record false in determine_response
-                response.add_answer(record)
-            elif record.rname == qname and record.rtype == RecordType.CNAME.value:
-                response = self.recursive_cname_query(record.rdata.label, qtype, records,record,response,glue_time)
+    #Returns record object
+    #no defense against zone file CNAMe loops
+    #
+    def recursive_cname_query(self,response, current_CNAME_record,glue=False):
+        if current_CNAME_record.rtype == RecordType.CNAME.value:
+            if glue == False:
+                response.add_answer(current_CNAME_record)
+            next_record = self.find_records(current_CNAME_record.rdata.label)
+            if len(next_record) == 1 and next_record[0].rtype == RecordType.CNAME.value:
+                return self.recursive_cname_query(response, next_record[0],glue)
         return response
 
     #given a request header we construct the correst response object and return it
@@ -96,6 +104,7 @@ class Server:
             
             relevant_NS_records = [record for record in self.records[RecordType.NS.value] if record.rname == qname]
             relevant_A_records = [record for record in self.records[RecordType.A.value] if record.rname == qname]
+            relevant_CNAME_records = [record for record in self.records[RecordType.CNAME.value] if record.rname == qname]
 
             if qtype == RecordType.NS.value:
                 for NS_record in relevant_NS_records:
