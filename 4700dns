@@ -118,7 +118,7 @@ class Server:
                     response.add_ar(A_record)
                 #add CNAME resolving search
                 for CNAME_record in relevant_CNAME_records:
-                    self.recursive_cname_query(response,CNAME_record,True)
+                    response = self.recursive_cname_query(response,CNAME_record,True)
             elif qtype == RecordType.A.value:
                 if len(relevant_NS_records) > 0: #If there are relevant NS records for this A record query
                     for NS_record in relevant_NS_records:
@@ -126,12 +126,17 @@ class Server:
                     for A_record in relevant_A_records:
                         response.add_ar(A_record)
                     #Add CNAMe record search but with glue
+                    for CNAME_record in relevant_CNAME_records:
+                        response = self.recursive_cname_query(response,CNAME_record,True)
                 else: #If there are no relevant NS records for this A record query
                     if len(relevant_A_records) > 0: #If there are relevant A records for this A record query
                         for A_record in relevant_A_records:
                             response.add_answer(A_record)
                         #add own NS records, NOT relevant NS records, it is optional but prolly do it later
                     #Also search for CNAMe record search
+                    elif len(relevant_CNAME_records) > 0:
+                        for CNAME_record in relevant_CNAME_records:
+                            response = self.recursive_cname_query(response,CNAME_record,False)
                     else:#We have found no relevant NS record or A records for this A record query
                         response.header.rcode = 3 #NXDOMAIN No A records exist for the domain, but we are authoritative so we return NXDOMAIN
         elif is_local:
