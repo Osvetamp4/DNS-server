@@ -121,12 +121,18 @@ class Server:
             relevant_A_records = [record for record in self.records[RecordType.A.value] if record.rname == qname]
             relevant_CNAME_records = [record for record in self.records[RecordType.CNAME.value] if record.rname == qname]
             relevant_MX_records = [record for record in self.records[RecordType.MX.value] if record.rname == qname]
+            relevant_TXT_records = [record for record in self.records[RecordType.TXT.value] if record.rname == qname]
 
             if qtype == RecordType.NS.value:
+
                 for NS_record in relevant_NS_records:
-                    response.add_answer(NS_record)
-                for A_record in relevant_A_records:
+                    response.add_auth(NS_record)
+                for A_record in relevant_A_records:#This only scans for any A records with the same name as the requested NS record. Not usable for any A records that those uncovered NS records point to
                     response.add_ar(A_record)
+                for NS_record in relevant_NS_records:
+                    subrelevant_A_records = [record for record in self.records[RecordType.A.value] if record.rname == NS_record.rdata.label]
+                    for A_record in subrelevant_A_records:
+                        response.add_ar(A_record)
                 #add CNAME resolving search
                 for CNAME_record in relevant_CNAME_records:
                     response = self.recursive_cname_query(response,CNAME_record,True)
@@ -153,6 +159,9 @@ class Server:
             elif qtype == RecordType.MX.value:
                 for MX_record in relevant_MX_records:
                     response.add_answer(MX_record)
+            elif qtype == RecordType.TXT.value:
+                for TXT_record in relevant_TXT_records:
+                    response.add_answer(TXT_record)
         elif is_local:
             #forward the request to the root server and return the response
             pass
