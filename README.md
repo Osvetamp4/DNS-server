@@ -16,3 +16,12 @@ record = {
     .ttl:    3600,               
     .rdata:  <A record object with value '192.168.1.10'>
 }
+
+
+from dnslib import DNSRecord, DNSHeader, DNSQuestion, QTYPE
+
+# Create a manual query for an A record
+q = DNSRecord(q=DNSQuestion("google.com", QTYPE.A))
+
+# Send it
+self.send((root_ip, 60053), q, sock=temp_socket)
