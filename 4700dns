@@ -175,21 +175,26 @@ class Server:
             pass
         return response
     
-    #This adds temp sockets that deal with a specific portion of the dns name lookup
-    #domain_name is the name that the client wants to figure out
-    #For the domain_name, its going to create a temp_socket to resolve information to get the next NS server and nothing more
-    #This function doesn't return anything, all this function does is START the action to get the NEXT ns or A record in line
-    #Different function should return the resolved NS or A record if found.
+    #This function STARTS the action to create a temp socket for a specific portion of the requested domain name and add it to the temp socket list
+    #Does not return anything by itself
+    #
     def handle_dns_lookup(self,domain_name):
         temp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        question_dns_record = DNSRecord(q=DNSQuestion("google.com", QTYPE.A)) #change this
-        self.send((self.root_ip,60053),question_dns_record,temp_socket)
+        question_dns_record = DNSRecord(q=DNSQuestion("google.com", QTYPE.A)) #change this to do smthn with domain_name
+        self.send_request((self.root_ip,60053),question_dns_record,temp_socket)
     
     #addr_tuple should usually be (self.root_ip,60053)
     #Sends the actual request and appends the temp socket to the socket list
     def send_request(self,addr_tuple,dns_record,target_socket):
         self.send(addr_tuple,dns_record,target_socket)
         self.temp_sockets.append(target_socket)
+    
+    #This function should be called a lot in the run() function to constantly check the temp socket list to see if any of the sockets have reponses
+    #if they do, try to resolve them to their immediate NS or A records.
+    #If they are A records, figure out how to send them to our client through self.socket
+    #If they are NS records, call handle_dns_lookup and append into temp socket list to resolve the NEXT step of the domain name.
+    def resolve_temp_socket(self):
+        pass
 
     def run(self):
         seq = 0
