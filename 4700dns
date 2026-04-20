@@ -164,7 +164,7 @@ class Server:
                 for TXT_record in relevant_TXT_records:
                     response.add_answer(TXT_record)
         elif is_local:
-            self.handle_dns_lookup(request,incoming_port)
+            self.handle_dns_lookup(request,(incoming_ip,incoming_port))
             #forward the request to the root server and return the response
             response = None
             pass
@@ -176,22 +176,29 @@ class Server:
     #This function STARTS the action to create a temp socket for a specific portion of the requested domain name and add it to the temp socket list
     #Does not return anything by itself
     #
-    def handle_dns_lookup(self,request,client_port): #This only runs once per request
+    def handle_dns_lookup(self,request,client_addr): #This only runs once per request
         temp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        question_dns_record = DNSRecord(q=DNSQuestion(request.questions.qname, QTYPE.A)) #Not all requests will be for A records, add more to this so it can also request for NS records.
-        self.socket_to_port_tracker[temp_socket] = client_port
+        client_q = request.questions[0]
+        question_dns_record = DNSRecord(q=DNSQuestion(client_q.qname, client_q.qtype)) #Not all requests will be for A records, add more to this so it can also request for NS records.
+        self.socket_to_port_tracker[temp_socket] = {
+            "client_ip": client_addr[0],
+            "client_port":client_addr[1],
+            "request_object":request,
+            "ns_list":[self.root_ip], #root server is the first NS we need to get the train started with
+            "ns_index":0
+        }
         self.send_request((self.root_ip,60053),question_dns_record,temp_socket) #This sends the actual request to the root server and appends to temp_socket list
     
     #addr_tuple should usually be (self.root_ip,60053)
     #Sends the actual request and appends the temp socket to the socket list
     def send_request(self,addr_tuple,dns_record,target_socket): #This only runs once per request
-        self.send(addr_tuple,dns_record,target_socket)
-        self.temp_sockets.append(target_socket)
+        self.send(addr_tuple,dns_record,target_socket)#This gets the actual NS chain train rolling
+        self.temp_sockets.append(target_socket) 
     
     #This function should be called a lot in the run() function to constantly check the temp socket list to see if any of the sockets have reponses
     #if they do, try to resolve them to their immediate NS or A records.
     #If they are A records, figure out how to send them to our client through self.socket
-    #If they are NS records, call handle_dns_lookup and append into temp socket list to resolve the NEXT step of the domain name.
+    #If they are NS records, call handle dns lookup and append into temp socket list to resolve the NEXT step of the domain name.
     def process_socket_response(self,temp_socket):
         data, addr = temp_socket.recvfrom(65535)
 
@@ -202,11 +209,28 @@ class Server:
         additional_section = response.ar
 
         if len(answer_section) > 0: #Has immediate ip addr! Check it and send it back to the client.
-            pass
+            response.header.aa = 0
+            response.header.ra = 1
+            response.header.id = self.socket_to_port_tracker[temp_socket]["request_object"].header.id #copy the original id over
+            client_ip = self.socket_to_port_tracker[temp_socket]["client_ip"]
+            client_port = self.socket_to_port_tracker[temp_socket]["client_port"]
+            client_addr = (client_ip,client_port)
+            self.send(client_addr,response,self.socket)
         elif len(authority_section) > 0: #Has nearby NS server instead, check it out, send request to that NS server, then reappend this back into the temp socket list
             #this is where we will also want to check out additional_section
+            ns_list = self.socket_to_port_tracker[temp_socket]["ns_list"]
+            ns_index = self.socket_to_port_tracker[temp_socket]["ns_index"]
+            referral_ns_list = []
+            for record in authority_section:
+                referral_ns_list.append(record.rdata)
+            for record in additional_section:
+                pass
+
+            self.socket_to_port_tracker[temp_socket]["ns_index"] = ns_index + 1 #We just hit one of the NS servers on the ns_list! We increment the index
+
+            print("WE DONT HAVE IMMEDIATE ANSWER")
             pass
-        else: #At this point we have hit a deadend.
+        else: #Change this to an elif statement to determine if ns_index reached end of ns_list
             pass
         
 
@@ -228,7 +252,7 @@ class Server:
                 if conn == self.socket:
                     self.recv(conn)
                 else:
-                    print("poopy butthole")
+                    self.process_socket_response(conn)
 
         return
 
