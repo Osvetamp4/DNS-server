@@ -220,7 +220,7 @@ class Server:
             #this is where we will also want to check out additional_section
             ns_list = self.socket_to_port_tracker[temp_socket]["ns_list"]
             ns_index = self.socket_to_port_tracker[temp_socket]["ns_index"]
-            self.socket_to_port_tracker[temp_socket]["ns_index"] = ns_index + 1 #We just hit one of the NS servers on the ns_list! We increment the index
+            
 
 
             authority_ns_list = []
@@ -233,6 +233,9 @@ class Server:
                     print("bailiwick is working correctly")
                     ns_list.append(str(record.rdata))
 
+            original_request_object = self.socket_to_port_tracker[temp_socket]["request_object"]
+            self.socket_to_port_tracker[temp_socket]["ns_index"] = ns_index + 1 #We just hit one of the NS servers on the ns_list! We increment the index
+            self.send((ns_list[self.socket_to_port_tracker[temp_socket]["ns_index"]],60053),original_request_object,temp_socket)
             
 
             print("WE DONT HAVE IMMEDIATE ANSWER")
