@@ -267,7 +267,7 @@ class Server:
                 last_label_in_record_domain_name_in_auth = self.get_last_label(record_domain_name_in_auth)
 
                 for record_in_additional in additional_section:
-                    rname_str = str(record_in_additional.rname).strip(".")#Why is this record???
+                    rname_str = str(record_in_additional.rname).strip(".")
                     print("rname_str:",rname_str)
                     last_label_in_rname_str = self.get_last_label(rname_str)
                     print("additional record name:",rname_str)
