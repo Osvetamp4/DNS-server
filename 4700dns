@@ -220,11 +220,14 @@ class Server:
             #this is where we will also want to check out additional_section
             ns_list = self.socket_to_port_tracker[temp_socket]["ns_list"]
             ns_index = self.socket_to_port_tracker[temp_socket]["ns_index"]
-            referral_ns_list = []
+            authority_ns_list = []
             for record in authority_section:
-                referral_ns_list.append(record.rdata)
+                if record.rtype == RecordType.NS.value:
+                    authority_ns_list.append(str(record.rdata).strip("."))
             for record in additional_section:
-                pass
+                rname_str = str(record.rname).strip(".")
+                if record.rname in authority_ns_list and record.rtype == RecordType.A.value:
+                    ns_list.append(str(record.rdata))
 
             self.socket_to_port_tracker[temp_socket]["ns_index"] = ns_index + 1 #We just hit one of the NS servers on the ns_list! We increment the index
 
