@@ -4,10 +4,6 @@ import argparse, socket, time, json, select, struct, sys, math
 from enum import Enum
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A, DNSQuestion
 
-class DNSRecordPair:
-    def __init__(self, domain_name, record):
-        self.domain_name = domain_name
-        self.record = record
 
 class RecordType(Enum):
     """DNS Record Type Numbers"""
@@ -24,6 +20,7 @@ class Server:
         self.domain = domain.split("/")[1].removesuffix(".zone") + "."
         self.zone_path = domain
         self.temp_sockets = []
+        self.socket_to_port_tracker = dict() #Map temporary socket objects directly to their client ports
 
         with open(self.zone_path, "r") as f:
                 zone_text = f.read()
@@ -35,7 +32,6 @@ class Server:
         for value in values:
             self.records[value] = []
         for record in recordList:
-            DNSRecordPair_Object = DNSRecordPair(record.rname, record)
             self.records[record.rtype].append(record)
         
 
@@ -59,7 +55,7 @@ class Server:
     def recv(self, socket):
         data, addr = socket.recvfrom(65535)
         incoming_ip, incoming_port = addr
-        print("addr", addr)
+        print("INCOMING PORT:", incoming_port)
 
         # Unpack the DNS request
         request = DNSRecord.parse(data)
@@ -68,12 +64,13 @@ class Server:
         print(request)
 
         
-        response = self.determine_response(request, incoming_ip)
+        response = self.determine_response(request, incoming_ip, incoming_port)
         if response == None:
             pass
         #response.add_answer(RR("abc.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=60))       
         else:
             self.send(addr, response, self.socket)
+
     #returns a mini dictionary of records
     def find_records(self,domain_name):
         found_records = []
@@ -107,7 +104,8 @@ class Server:
         return response
 
     #given a request header we construct the correst response object and return it
-    def determine_response(self, request, incoming_ip):
+    def determine_response(self, request, incoming_ip,incoming_port):
+        #print("INCOMING IP:",incoming_ip)
         #If request is for domain we are authoritative over, return the correct response
         #If request is for a domain we are not authoritative over, then determine if client is local, if is then forward request to root server, else reject
         qname = request.q.qname
@@ -166,7 +164,7 @@ class Server:
                 for TXT_record in relevant_TXT_records:
                     response.add_answer(TXT_record)
         elif is_local:
-            #self.handle_dns_lookup()
+            self.handle_dns_lookup(request,incoming_port)
             #forward the request to the root server and return the response
             response = None
             pass
@@ -178,14 +176,15 @@ class Server:
     #This function STARTS the action to create a temp socket for a specific portion of the requested domain name and add it to the temp socket list
     #Does not return anything by itself
     #
-    def handle_dns_lookup(self,domain_name):
+    def handle_dns_lookup(self,request,client_port): #This only runs once per request
         temp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        question_dns_record = DNSRecord(q=DNSQuestion("google.com", QTYPE.A)) #change this to do smthn with domain_name
-        self.send_request((self.root_ip,60053),question_dns_record,temp_socket)
+        question_dns_record = DNSRecord(q=DNSQuestion(request.questions.qname, QTYPE.A)) #Not all requests will be for A records, add more to this so it can also request for NS records.
+        self.socket_to_port_tracker[temp_socket] = client_port
+        self.send_request((self.root_ip,60053),question_dns_record,temp_socket) #This sends the actual request to the root server and appends to temp_socket list
     
     #addr_tuple should usually be (self.root_ip,60053)
     #Sends the actual request and appends the temp socket to the socket list
-    def send_request(self,addr_tuple,dns_record,target_socket):
+    def send_request(self,addr_tuple,dns_record,target_socket): #This only runs once per request
         self.send(addr_tuple,dns_record,target_socket)
         self.temp_sockets.append(target_socket)
     
@@ -193,16 +192,43 @@ class Server:
     #if they do, try to resolve them to their immediate NS or A records.
     #If they are A records, figure out how to send them to our client through self.socket
     #If they are NS records, call handle_dns_lookup and append into temp socket list to resolve the NEXT step of the domain name.
-    def resolve_temp_socket(self):
-        pass
+    def process_socket_response(self,temp_socket):
+        data, addr = temp_socket.recvfrom(65535)
+
+        # Unpack the DNS response
+        response = DNSRecord.parse(data)
+        answer_section = response.rr
+        authority_section = response.auth
+        additional_section = response.ar
+
+        if len(answer_section) > 0: #Has immediate ip addr! Check it and send it back to the client.
+            pass
+        elif len(authority_section) > 0: #Has nearby NS server instead, check it out, send request to that NS server, then reappend this back into the temp socket list
+            #this is where we will also want to check out additional_section
+            pass
+        else: #At this point we have hit a deadend.
+            pass
+        
+
+        
+        #response = self.determine_response(request, incoming_ip)
+        if response == None:
+            pass
+              
+        else:
+            self.send(addr, response, self.socket)
 
     def run(self):
         seq = 0
 
         while True:
-            socks = select.select([self.socket], [], [], 0.1)[0]
+            socks = select.select([self.socket] + self.temp_sockets, [], [], 0.1)[0]
+            
             for conn in socks:
-                self.recv(conn)
+                if conn == self.socket:
+                    self.recv(conn)
+                else:
+                    print("poopy butthole")
 
         return
 
