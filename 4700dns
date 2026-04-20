@@ -185,7 +185,9 @@ class Server:
             "client_port":client_addr[1],
             "request_object":request,
             "ns_list":[self.root_ip], #root server is the first NS we need to get the train started with
-            "ns_index":0
+            "ns_index":0,
+            "is_sidequest":False,
+            "parent_quest": None
         }
         self.send_request((self.root_ip,60053),question_dns_record,temp_socket) #This sends the actual request to the root server and appends to temp_socket list
     
@@ -195,11 +197,16 @@ class Server:
         self.send(addr_tuple,dns_record,target_socket)#This gets the actual NS chain train rolling
         self.temp_sockets.append(target_socket) 
     
+    #Gets the very last label in domain_name excluding the root
+    def get_last_label(self,domain_name):
+        return domain_name.strip(".").split(".")[-1]
+    
     #This function should be called a lot in the run() function to constantly check the temp socket list to see if any of the sockets have reponses
     #if they do, try to resolve them to their immediate NS or A records.
     #If they are A records, figure out how to send them to our client through self.socket
     #If they are NS records, call handle dns lookup and append into temp socket list to resolve the NEXT step of the domain name.
     def process_socket_response(self,temp_socket):
+        
         data, addr = temp_socket.recvfrom(65535)
 
         # Unpack the DNS response
@@ -207,6 +214,8 @@ class Server:
         answer_section = response.rr
         authority_section = response.auth
         additional_section = response.ar
+        print("response.qname:",response.qname)
+        if len(additional_section) == 0: print("ADDITIONAL IS EMPTY")
 
         if len(answer_section) > 0: #Has immediate ip addr! Check it and send it back to the client.
             response.header.aa = 0
@@ -216,41 +225,75 @@ class Server:
             client_port = self.socket_to_port_tracker[temp_socket]["client_port"]
             client_addr = (client_ip,client_port)
             self.send(client_addr,response,self.socket)
+            #add code to remove frp temp socket list and from the dictionary AND remove the temp socket itself.
         elif len(authority_section) > 0: #Has nearby NS server instead, check it out, send request to that NS server, then reappend this back into the temp socket list
-            #this is where we will also want to check out additional_section
-            ns_list = self.socket_to_port_tracker[temp_socket]["ns_list"]
-            ns_index = self.socket_to_port_tracker[temp_socket]["ns_index"]
             
+            
+            #this is where we will also want to check out additional_section
+            print("Looking at authority section")
+            ns_list = self.socket_to_port_tracker[temp_socket]["ns_list"]
+            #ns_index = self.socket_to_port_tracker[temp_socket]["ns_index"]
 
+            original_request_object = self.socket_to_port_tracker[temp_socket]["request_object"]
+            print("aa bit:",response.header.aa)
+            
+            if response.header.aa == 1 and original_request_object.questions[0].qtype == RecordType.NS.value: #We have our NS record answer!!
+                print("We found answer for NS records")
+                response.header.aa = 0
+                response.header.ra = 1
+                response.header.id = self.socket_to_port_tracker[temp_socket]["request_object"].header.id #copy the original id over
+                client_ip = self.socket_to_port_tracker[temp_socket]["client_ip"]
+                client_port = self.socket_to_port_tracker[temp_socket]["client_port"]
+                client_addr = (client_ip,client_port)
+                self.send(client_addr,response,self.socket)
+                #add code to remove frp temp socket list and from the dictionary AND remove the temp socket itself.
+                return
 
+            str_authority_ns_list = []
             authority_ns_list = []
             for record in authority_section:
                 if record.rtype == RecordType.NS.value:
-                    authority_ns_list.append(str(record.rdata).strip("."))
-            for record in additional_section:
-                rname_str = str(record.rname).strip(".")
-                if rname_str in authority_ns_list and record.rtype == RecordType.A.value:
-                    print("bailiwick is working correctly")
-                    ns_list.append(str(record.rdata))
+                    str_authority_ns_list.append(str(record.rdata).strip("."))
+                    authority_ns_list.append(record)
+            
+            print("AUTHORITY SECTION",authority_section)
+            print("ADDITIONAL SECTION", additional_section)
 
-            original_request_object = self.socket_to_port_tracker[temp_socket]["request_object"]
-            self.socket_to_port_tracker[temp_socket]["ns_index"] = ns_index + 1 #We just hit one of the NS servers on the ns_list! We increment the index
+            #This for loop, scans authority section and additional section
+            #For both it determines if an authority section record has a corresponding glue record in additional section
+            for recordIndex in range(len(authority_ns_list)): 
+                record_object_in_auth = authority_ns_list[recordIndex]
+                record_domain_name_in_auth = str_authority_ns_list[recordIndex].strip(".")
+                last_label_in_record_domain_name_in_auth = self.get_last_label(record_domain_name_in_auth)
+
+                for record_in_additional in additional_section:
+                    rname_str = str(record_in_additional.rname).strip(".")#Why is this record???
+                    print("rname_str:",rname_str)
+                    last_label_in_rname_str = self.get_last_label(rname_str)
+                    print("additional record name:",rname_str)
+                    print("record_domain_name_in_auth:",record_domain_name_in_auth)
+                    print("last labels should match:",last_label_in_record_domain_name_in_auth,"==",last_label_in_rname_str)
+                    if last_label_in_record_domain_name_in_auth == last_label_in_rname_str:#We found a glue record(could be A or NS) in additional section pertaining to one in authority section
+                        if record_in_additional.rtype == RecordType.A.value:
+                            print("Bailiwick is working correctly")
+                            ns_list.append(str(record_in_additional.rdata))
+                        
+            
+
+            
+            print("ns_index before:",self.socket_to_port_tracker[temp_socket]["ns_index"])
+            self.socket_to_port_tracker[temp_socket]["ns_index"] += 1 #We just hit one of the NS servers on the ns_list! We increment the index
+            print("ns_list:",ns_list,"| ns_index after:",self.socket_to_port_tracker[temp_socket]["ns_index"])
+            #print("stored object:",self.socket_to_port_tracker[temp_socket])
             self.send((ns_list[self.socket_to_port_tracker[temp_socket]["ns_index"]],60053),original_request_object,temp_socket)
             
 
-            print("WE DONT HAVE IMMEDIATE ANSWER")
+            
             pass
         else: #Change this to an elif statement to determine if ns_index reached end of ns_list
             pass
+        print("TEMPSOCKET object:",self.socket_to_port_tracker[temp_socket])
         
-
-        
-        #response = self.determine_response(request, incoming_ip)
-        if response == None:
-            pass
-              
-        else:
-            self.send(addr, response, self.socket)
 
     def run(self):
         seq = 0
