@@ -10,8 +10,7 @@ class RecordType(Enum):
     SOA = 6
     MX = 15
     TXT = 16
-# Format: <name> <TTL> <Class> <Type> <Data>
-# Note: CNAME is type 5, A is type 1.
+
 zone_data = """
 cname.6.    60  IN  CNAME  cname.7.
 cname.1.    60  IN  CNAME  cname.2.
@@ -27,7 +26,7 @@ zone_data1 = """
 cname.6.    60  IN  CNAME  cname.7.
 cname.7.    60  IN  CNAME  somewhere.else.
 """
-# This returns a list of RR objects
+
 test_records = RR.fromZone(zone_data1)
 for i in test_records:
     print(i)
