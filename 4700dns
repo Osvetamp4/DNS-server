@@ -208,15 +208,15 @@ class Server:
     def process_socket_response(self,temp_socket):
         
         data, addr = temp_socket.recvfrom(65535)
-        print("THIS IS THE SERVER YOU GOT RESPONSE FROM:",addr)
+        
 
         # Unpack the DNS response
         response = DNSRecord.parse(data)
         answer_section = response.rr
         authority_section = response.auth
         additional_section = response.ar
-        print("response.qname:",response.questions[0].qname)
-        if len(additional_section) == 0: print("ADDITIONAL IS EMPTY")
+        
+        
 
         if len(answer_section) > 0: #Has immediate ip addr! Check it and send it back to the client.
             response.header.aa = 0
@@ -231,12 +231,12 @@ class Server:
             
             
             #this is where we will also want to check out additional_section
-            print("Looking at authority section")
+            
             ns_list = self.socket_to_port_tracker[temp_socket]["ns_list"]
             #ns_index = self.socket_to_port_tracker[temp_socket]["ns_index"]
 
             original_request_object = self.socket_to_port_tracker[temp_socket]["request_object"]
-            print("aa bit:",response.header.aa)
+            
             
             
             if original_request_object.questions[0].qtype == RecordType.NS.value: #NS records exist in authority and we want NS records
@@ -247,7 +247,7 @@ class Server:
                         break
 
                 if requested_ns_record_found:
-                    print("We found answer for NS records")
+                    
                     response.header.aa = 0
                     response.header.ra = 1
                     response.header.id = self.socket_to_port_tracker[temp_socket]["request_object"].header.id #copy the original id over
@@ -277,7 +277,7 @@ class Server:
 
                 for record_in_additional in additional_section:
                     rname_str = str(record_in_additional.rname).strip(".")
-                    print("rname_str:",rname_str)
+                    
                     last_label_in_rname_str = self.get_last_label(rname_str)
                     print("additional record name:",rname_str)
                     print("record_domain_name_in_auth:",record_domain_name_in_auth)
@@ -290,10 +290,9 @@ class Server:
             
 
             
-            print("ns_index before:",self.socket_to_port_tracker[temp_socket]["ns_index"])
+            
             self.socket_to_port_tracker[temp_socket]["ns_index"] += 1 #We just hit one of the NS servers on the ns_list! We increment the index
-            print("ns_list:",ns_list,"| ns_index after:",self.socket_to_port_tracker[temp_socket]["ns_index"])
-            #print("stored object:",self.socket_to_port_tracker[temp_socket])
+            
             self.send((ns_list[self.socket_to_port_tracker[temp_socket]["ns_index"]],60053),original_request_object,temp_socket)
             
 
@@ -302,7 +301,7 @@ class Server:
         else: #Change this to an elif statement to determine if ns_index reached end of ns_list
             print("answer and authority are both empty")
             print("All sections are empty, here is the aa header:",response.header.aa)
-        print("TEMPSOCKET object:",self.socket_to_port_tracker[temp_socket])
+        
         
 
     def run(self):
