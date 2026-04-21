@@ -48,7 +48,7 @@ class Server:
         sys.stderr.flush()
 
     def send(self, addr, message,target_socket):
-        self.log("Sending message:\n%s" % message)
+        self.log("Sending message to %s:\n%s" % (addr, message))
         #self.socket.sendto(message.pack(), addr)
         target_socket.sendto(message.pack(),addr)
 
@@ -225,6 +225,17 @@ class Server:
             client_ip = self.socket_to_port_tracker[temp_socket]["client_ip"]
             client_port = self.socket_to_port_tracker[temp_socket]["client_port"]
             client_addr = (client_ip,client_port)
+            original_requested_domain_name = self.socket_to_port_tracker[temp_socket]["request_object"].questions[0].qname
+            new_answer_section = []
+            print("answer section:",answer_section)
+            for record in answer_section:
+                #record = answer_section[record_index]
+                if record.rname == original_requested_domain_name:
+                    new_answer_section.append(record)
+            response.rr = new_answer_section
+            print("answer section after bailiwick:",answer_section)
+            if len(answer_section) == 0:
+                response.header.rcode = 0
             self.send(client_addr,response,self.socket)
             #add code to remove frp temp socket list and from the dictionary AND remove the temp socket itself.
         elif len(authority_section) > 0: #Has nearby NS server instead, check it out, send request to that NS server, then reappend this back into the temp socket list
@@ -301,6 +312,16 @@ class Server:
         else: #Change this to an elif statement to determine if ns_index reached end of ns_list
             print("answer and authority are both empty")
             print("All sections are empty, here is the aa header:",response.header.aa)
+            response.header.aa = 0
+            response.header.ra = 1
+            response.header.rcode = 0
+            response.ar = []
+            response.header.id = self.socket_to_port_tracker[temp_socket]["request_object"].header.id
+            client_ip = self.socket_to_port_tracker[temp_socket]["client_ip"]
+            client_port = self.socket_to_port_tracker[temp_socket]["client_port"]
+            client_addr = (client_ip,client_port)
+            self.send(client_addr,response,self.socket)
+
         
         
 
