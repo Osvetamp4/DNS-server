@@ -278,7 +278,7 @@ class Server:
             return []
 
         now = time.time()
-        # Only keep records where (Current Time - Arrival) < TTL
+        
         fresh_entries = [
             entry for entry in self.cache[record_key] 
             if (now - entry["timestamp"]) < entry["record"].ttl
