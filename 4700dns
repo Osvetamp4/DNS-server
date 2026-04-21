@@ -3,7 +3,7 @@
 import argparse, socket, time, json, select, struct, sys, math
 from enum import Enum
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A, DNSQuestion
-
+import copy
 
 class RecordType(Enum):
     """DNS Record Type Numbers"""
@@ -33,6 +33,8 @@ class Server:
             self.records[value] = []
         for record in recordList:
             self.records[record.rtype].append(record)
+
+        self.cache = dict()
         
 
         
@@ -164,6 +166,14 @@ class Server:
                 for TXT_record in relevant_TXT_records:
                     response.add_answer(TXT_record)
         elif is_local:
+            cache_key = (qname,qtype)
+            fresh_records = self.get_fresh_records(cache_key)
+            if len(fresh_records) > 0:
+                response.header.ra = 1
+                response.header.aa = 0
+                for record in fresh_records:
+                    response.add_answer(record)
+                return response
             self.handle_dns_lookup(request,(incoming_ip,incoming_port))
             #forward the request to the root server and return the response
             response = None
@@ -186,8 +196,7 @@ class Server:
             "request_object":request,
             "ns_list":[self.root_ip], #root server is the first NS we need to get the train started with
             "ns_index":0,
-            "is_sidequest":False,
-            "parent_quest": None
+            "CNAME_chain": []
         }
         self.send_request((self.root_ip,60053),question_dns_record,temp_socket) #This sends the actual request to the root server and appends to temp_socket list
     
@@ -253,6 +262,36 @@ class Server:
 
         return CNAME_chain_list
 
+
+
+    def cache_record(self,target_record):
+        current_list = self.cache.get((target_record.rname,target_record.rtype),[])
+        entry = {
+            "record":target_record,
+            "timestamp":time.time()
+        }
+        current_list.append(entry)
+        self.cache[(target_record.rname,target_record.rtype)] = current_list
+    
+    def get_fresh_records(self, record_key):
+        if record_key not in self.cache:
+            return []
+
+        now = time.time()
+        # Only keep records where (Current Time - Arrival) < TTL
+        fresh_entries = [
+            entry for entry in self.cache[record_key] 
+            if (now - entry["timestamp"]) < entry["record"].ttl
+        ]
+        
+        # Update the cache with only the survivors
+        self.cache[record_key] = fresh_entries
+        if (len(fresh_entries)) == 0:
+            del self.cache[record_key]
+            return []
+        
+        # Return just the RR objects for the DNS response
+        return [e["record"] for e in fresh_entries]
     #This function should be called a lot in the run() function to constantly check the temp socket list to see if any of the sockets have reponses
     #if they do, try to resolve them to their immediate NS or A records.
     #If they are A records, figure out how to send them to our client through self.socket
@@ -273,8 +312,35 @@ class Server:
         if len(answer_section) > 0: #Has immediate ip addr! Check it and send it back to the client.
             print("answer section:",answer_section)
             print("cname chain:",self.get_cname_chain_only(answer_section))
-            if len(answer_section) == 1 and answer_section[0].rtype == RecordType.CNAME.value:
-                pass
+
+            #tracker = self.socket_to_port_tracker[temp_socket]
+            #original_qname = self.socket_to_port_tracker[temp_socket]["request_object"].q.qname
+            #original_qtype = self.socket_to_port_tracker[temp_socket]["request_object"].q.qtype
+            for record in answer_section:
+                self.cache_record(record)
+
+            CNAME_chain = self.get_cname_chain_only(answer_section)
+            if len(CNAME_chain) > 0: #CNAME CHAIN exists
+                self.socket_to_port_tracker[temp_socket]["CNAME_chain"] = self.socket_to_port_tracker[temp_socket]["CNAME_chain"] + CNAME_chain #add the cname chain to current
+                if CNAME_chain[-1].rtype == RecordType.A.value: #We reached the end! We are finished
+                    sub_response = self.socket_to_port_tracker[temp_socket]["request_object"].reply()
+                    sub_response.header.aa = 0
+                    sub_response.header.ra = 1
+                    client_ip = self.socket_to_port_tracker[temp_socket]["client_ip"]
+                    client_port = self.socket_to_port_tracker[temp_socket]["client_port"]
+                    client_addr = (client_ip,client_port)
+                    self.send(client_addr,sub_response,self.socket)
+                    return
+                elif CNAME_chain[-1].rtype == RecordType.CNAME.value:#We need to reset
+                    self.socket_to_port_tracker[temp_socket]["CNAME_chain"] = self.socket_to_port_tracker[temp_socket]["CNAME_chain"] + CNAME_chain
+                    self.socket_to_port_tracker[temp_socket]["ns_list"] = [self.root_ip]
+                    self.socket_to_port_tracker[temp_socket]["ns_index"] = 0
+                    deep_copy_original_request = copy.deepcopy(self.socket_to_port_tracker[temp_socket]["request_object"])
+                    deep_copy_original_request.questions[0].qname = CNAME_chain[-1].rname
+                    self.send((self.socket_to_port_tracker[temp_socket]["ns_list"][self.socket_to_port_tracker[temp_socket]["ns_index"]],60053),deep_copy_original_request,temp_socket)
+                    return
+
+
             response.header.aa = 0
             response.header.ra = 1
             response.header.id = self.socket_to_port_tracker[temp_socket]["request_object"].header.id #copy the original id over
@@ -377,6 +443,7 @@ class Server:
             client_port = self.socket_to_port_tracker[temp_socket]["client_port"]
             client_addr = (client_ip,client_port)
             self.send(client_addr,response,self.socket)
+            return
 
         
         

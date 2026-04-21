@@ -24,7 +24,7 @@ somewhere.else.    60  IN  A      1.2.3.4
 """
 
 zone_data1 = """
-somewhere.else.    60  IN  A      1.2.3.4
+cname.6.    60  IN  CNAME  cname.7.
 cname.7.    60  IN  CNAME  somewhere.else.
 """
 # This returns a list of RR objects
