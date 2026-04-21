@@ -201,6 +201,58 @@ class Server:
     def get_last_label(self,domain_name):
         return domain_name.strip(".").split(".")[-1]
     
+    def find_record_by_rname(self,target_record_name,records):
+        for record in records:
+            if record.rname == target_record_name:
+                return record
+        return None
+    
+    def get_record_by_name(self,target_record_name,records):
+        for record in records:
+            if record.rname == target_record_name:
+                return record
+        return None
+    
+    def get_cname_chain_only(self,records):
+        CNAME_record_exists = False
+        for record in records:
+            if record.rtype == RecordType.CNAME.value:
+                CNAME_record_exists = True
+                break
+        if CNAME_record_exists == False: return []
+
+        if len(records) == 1:
+            return records
+
+        #maps a record object A (A->B) like B : A
+        CNAME_record_dictionary = dict()
+        for record in records:
+            if record.rtype == RecordType.CNAME.value:
+                next_pointed_record = self.get_record_by_name(str(record.rdata),records)
+                if next_pointed_record == None:
+                    continue
+                CNAME_record_dictionary[str(next_pointed_record.rname)] = record
+            
+        
+        current_key = list(CNAME_record_dictionary.keys())[0]
+        while current_key in CNAME_record_dictionary:
+            current_key = str(CNAME_record_dictionary[current_key].rname)
+            #print(CNAME_record_dictionary[current_key])
+            print("current key",current_key)
+        
+
+        
+        current_CNAME_record = self.get_record_by_name(current_key,records)
+        current_CNAME_rname = str(current_CNAME_record.rname)
+        CNAME_chain_list = []
+        while current_CNAME_record != None:
+            CNAME_chain_list.append(current_CNAME_record)
+            current_CNAME_rname = str(current_CNAME_record.rdata) #Gets the next name and puts it into current
+            current_CNAME_record = self.get_record_by_name(current_CNAME_rname,records)
+        
+
+        return CNAME_chain_list
+
     #This function should be called a lot in the run() function to constantly check the temp socket list to see if any of the sockets have reponses
     #if they do, try to resolve them to their immediate NS or A records.
     #If they are A records, figure out how to send them to our client through self.socket
@@ -219,6 +271,10 @@ class Server:
         
 
         if len(answer_section) > 0: #Has immediate ip addr! Check it and send it back to the client.
+            print("answer section:",answer_section)
+            print("cname chain:",self.get_cname_chain_only(answer_section))
+            if len(answer_section) == 1 and answer_section[0].rtype == RecordType.CNAME.value:
+                pass
             response.header.aa = 0
             response.header.ra = 1
             response.header.id = self.socket_to_port_tracker[temp_socket]["request_object"].header.id #copy the original id over
@@ -227,7 +283,7 @@ class Server:
             client_addr = (client_ip,client_port)
             original_requested_domain_name = self.socket_to_port_tracker[temp_socket]["request_object"].questions[0].qname
             new_answer_section = []
-            print("answer section:",answer_section)
+            #print("answer section:",answer_section)
             for record in answer_section:
                 #record = answer_section[record_index]
                 if record.rname == original_requested_domain_name:
@@ -309,7 +365,7 @@ class Server:
 
             
             pass
-        else: #Change this to an elif statement to determine if ns_index reached end of ns_list
+        else: 
             print("answer and authority are both empty")
             print("All sections are empty, here is the aa header:",response.header.aa)
             response.header.aa = 0
