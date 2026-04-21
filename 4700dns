@@ -208,13 +208,14 @@ class Server:
     def process_socket_response(self,temp_socket):
         
         data, addr = temp_socket.recvfrom(65535)
+        print("THIS IS THE SERVER YOU GOT RESPONSE FROM:",addr)
 
         # Unpack the DNS response
         response = DNSRecord.parse(data)
         answer_section = response.rr
         authority_section = response.auth
         additional_section = response.ar
-        print("response.qname:",response.qname)
+        print("response.qname:",response.questions[0].qname)
         if len(additional_section) == 0: print("ADDITIONAL IS EMPTY")
 
         if len(answer_section) > 0: #Has immediate ip addr! Check it and send it back to the client.
@@ -237,17 +238,25 @@ class Server:
             original_request_object = self.socket_to_port_tracker[temp_socket]["request_object"]
             print("aa bit:",response.header.aa)
             
-            if response.header.aa == 1 and original_request_object.questions[0].qtype == RecordType.NS.value: #We have our NS record answer!!
-                print("We found answer for NS records")
-                response.header.aa = 0
-                response.header.ra = 1
-                response.header.id = self.socket_to_port_tracker[temp_socket]["request_object"].header.id #copy the original id over
-                client_ip = self.socket_to_port_tracker[temp_socket]["client_ip"]
-                client_port = self.socket_to_port_tracker[temp_socket]["client_port"]
-                client_addr = (client_ip,client_port)
-                self.send(client_addr,response,self.socket)
-                #add code to remove frp temp socket list and from the dictionary AND remove the temp socket itself.
-                return
+            
+            if original_request_object.questions[0].qtype == RecordType.NS.value: #NS records exist in authority and we want NS records
+                requested_ns_record_found = False
+                for record in authority_section:
+                    if record.rname == response.questions[0].qname:
+                        requested_ns_record_found = True
+                        break
+
+                if requested_ns_record_found:
+                    print("We found answer for NS records")
+                    response.header.aa = 0
+                    response.header.ra = 1
+                    response.header.id = self.socket_to_port_tracker[temp_socket]["request_object"].header.id #copy the original id over
+                    client_ip = self.socket_to_port_tracker[temp_socket]["client_ip"]
+                    client_port = self.socket_to_port_tracker[temp_socket]["client_port"]
+                    client_addr = (client_ip,client_port)
+                    self.send(client_addr,response,self.socket)
+                    #add code to remove frp temp socket list and from the dictionary AND remove the temp socket itself.
+                    return
 
             str_authority_ns_list = []
             authority_ns_list = []
@@ -291,7 +300,8 @@ class Server:
             
             pass
         else: #Change this to an elif statement to determine if ns_index reached end of ns_list
-            pass
+            print("answer and authority are both empty")
+            print("All sections are empty, here is the aa header:",response.header.aa)
         print("TEMPSOCKET object:",self.socket_to_port_tracker[temp_socket])
         
 
