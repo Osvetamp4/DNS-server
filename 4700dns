@@ -1,13 +1,9 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse, socket, time, select, sys
 from enum import Enum
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A, DNSQuestion
-
-class DNSRecordPair:
-    def __init__(self, domain_name, record):
-        self.domain_name = domain_name
-        self.record = record
+import copy
 
 class RecordType(Enum):
     """DNS Record Type Numbers"""
@@ -18,193 +14,563 @@ class RecordType(Enum):
     MX = 15
     TXT = 16
 
+TIMEOUT = 3.0  # seconds before retrying an upstream server
+MAX_RETRIES = 2
+
 class Server:
     def __init__(self, root_ip, domain, port):
         self.root_ip = root_ip
         self.domain = domain.split("/")[1].removesuffix(".zone") + "."
         self.zone_path = domain
         self.temp_sockets = []
+        self.socket_to_port_tracker = dict()
 
         with open(self.zone_path, "r") as f:
-                zone_text = f.read()
-                print(zone_text)
+            zone_text = f.read()
+            print(zone_text)
         recordList = list(RR.fromZone(zone_text))
         self.recordList = recordList
         self.records = dict()
-        values = [r.value for r in RecordType]
-        for value in values:
-            self.records[value] = []
+        for r in RecordType:
+            self.records[r.value] = []
         for record in recordList:
-            DNSRecordPair_Object = DNSRecordPair(record.rname, record)
             self.records[record.rtype].append(record)
-        
 
-        
-
+        self.cache = dict()
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(("0.0.0.0", port))
         self.port = self.socket.getsockname()[1]
-
         self.log("Bound to port %d" % self.port)
 
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
-    def send(self, addr, message,target_socket):
-        self.log("Sending message:\n%s" % message)
-        #self.socket.sendto(message.pack(), addr)
-        target_socket.sendto(message.pack(),addr)
+    def send(self, addr, message, target_socket):
+        self.log("Sending message to %s:\n%s" % (addr, message))
+        target_socket.sendto(message.pack(), addr)
 
-    def recv(self, socket):
-        data, addr = socket.recvfrom(65535)
+    def recv(self, sock):
+        data, addr = sock.recvfrom(65535)
         incoming_ip, incoming_port = addr
-        print("addr", addr)
-
-        # Unpack the DNS request
-        request = DNSRecord.parse(data)
-        #self.log("Received message:\n%s" % request)
+        try:
+            request = DNSRecord.parse(data)
+        except Exception as e:
+            self.log("Malformed packet, ignoring: %s" % e)
+            return
         self.log("Received message")
         print(request)
 
-        
-        response = self.determine_response(request, incoming_ip)
-        if response == None:
-            pass
-        #response.add_answer(RR("abc.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=60))       
-        else:
+        if len(request.questions) != 1:
+            response = request.reply()
+            response.header.rcode = 2  # SERVFAIL
             self.send(addr, response, self.socket)
-    #returns a mini dictionary of records
-    def find_records(self,domain_name):
-        found_records = []
-        for record in self.recordList:
-            if record.rname == domain_name:
-                found_records.append(record)
-        return found_records
-    
-    #Recursively goes through zone file CNAME records to find the correct A record if one exists, otherwise returns the CNAME record
-    #Returns record object
-    #no defense against zone file CNAMe loops
-    #
-    def recursive_cname_query(self,response, current_CNAME_record,glue=False):
-        if current_CNAME_record.rtype == RecordType.CNAME.value:
-            if glue == False:
-                response.add_answer(current_CNAME_record)
-            next_record = self.find_records(current_CNAME_record.rdata.label)
-            if len(next_record) == 1 and next_record[0].rtype == RecordType.CNAME.value: #The next chained record is a CNAME record
-                return self.recursive_cname_query(response, next_record[0],glue)
-            else: #The next chained record is actually A records
-                for record in next_record:
-                    if glue == False:
-                        response.add_answer(record)
-                    elif glue == True:
-                        response.add_ar(record)
-        elif current_CNAME_record.rtype == RecordType.A.value: #we have reached the end of the CNAMe chain and arrived at an A record
-            if glue == False:
-                response.add_answer(current_CNAME_record)
-            elif glue == True:
-                response.add_ar(current_CNAME_record)
+            return
+
+        response = self.determine_response(request, incoming_ip, incoming_port)
+        if response is not None:
+            self.send(addr, response, self.socket)
+
+    def find_records(self, domain_name):
+        return [r for r in self.recordList if r.rname == domain_name]
+
+    def recursive_cname_query(self, response, current_record, glue=False):
+        if current_record.rtype == RecordType.CNAME.value:
+            if not glue:
+                response.add_answer(current_record)
+            else:
+                response.add_ar(current_record)
+            next_records = self.find_records(current_record.rdata.label)
+            if len(next_records) == 1 and next_records[0].rtype == RecordType.CNAME.value:
+                return self.recursive_cname_query(response, next_records[0], glue)
+            for r in next_records:
+                if not glue:
+                    response.add_answer(r)
+                else:
+                    response.add_ar(r)
+        elif current_record.rtype == RecordType.A.value:
+            if not glue:
+                response.add_answer(current_record)
+            else:
+                response.add_ar(current_record)
         return response
 
-    #given a request header we construct the correst response object and return it
-    def determine_response(self, request, incoming_ip):
-        #If request is for domain we are authoritative over, return the correct response
-        #If request is for a domain we are not authoritative over, then determine if client is local, if is then forward request to root server, else reject
+    def determine_response(self, request, incoming_ip, incoming_port):
         qname = request.q.qname
         qtype = request.q.qtype
-        is_authoritative = str(qname).endswith(self.domain) or str(qname).endswith("." + self.domain)
+        qname_str = str(qname).rstrip(".")
+        domain_str = self.domain.rstrip(".")
+        is_authoritative = (qname_str == domain_str) or qname_str.endswith("." + domain_str)
         is_local = (incoming_ip == "127.0.0.1")
         response = request.reply()
-        
+
         if is_authoritative:
-            #do this only if this dns server is authoritative for the req domain
             response.header.aa = 1
-            
-            relevant_NS_records = [record for record in self.records[RecordType.NS.value] if record.rname == qname]
-            relevant_A_records = [record for record in self.records[RecordType.A.value] if record.rname == qname]
-            relevant_CNAME_records = [record for record in self.records[RecordType.CNAME.value] if record.rname == qname]
-            relevant_MX_records = [record for record in self.records[RecordType.MX.value] if record.rname == qname]
-            relevant_TXT_records = [record for record in self.records[RecordType.TXT.value] if record.rname == qname]
+            rel_NS = [r for r in self.records[RecordType.NS.value]    if r.rname == qname]
+            rel_A  = [r for r in self.records[RecordType.A.value]     if r.rname == qname]
+            rel_CN = [r for r in self.records[RecordType.CNAME.value] if r.rname == qname]
+            rel_MX = [r for r in self.records[RecordType.MX.value]    if r.rname == qname]
+            rel_TX = [r for r in self.records[RecordType.TXT.value]   if r.rname == qname]
 
             if qtype == RecordType.NS.value:
-
-                for NS_record in relevant_NS_records:
-                    response.add_auth(NS_record)
-                for A_record in relevant_A_records:#This only scans for any A records with the same name as the requested NS record. Not usable for any A records that those uncovered NS records point to
-                    response.add_ar(A_record)
-                for NS_record in relevant_NS_records:
-                    subrelevant_A_records = [record for record in self.records[RecordType.A.value] if record.rname == NS_record.rdata.label]
-                    for A_record in subrelevant_A_records:
-                        response.add_ar(A_record)
-                #add CNAME resolving search
-                for CNAME_record in relevant_CNAME_records:
-                    response = self.recursive_cname_query(response,CNAME_record,True)
+                for r in rel_NS:
+                    response.add_auth(r)
+                for r in rel_A:
+                    response.add_ar(r)
+                for r in rel_NS:
+                    for ar in [x for x in self.records[RecordType.A.value] if x.rname == r.rdata.label]:
+                        response.add_ar(ar)
+                for r in rel_CN:
+                    response = self.recursive_cname_query(response, r, True)
             elif qtype == RecordType.A.value:
-                if len(relevant_NS_records) > 0: #If there are relevant NS records for this A record query
-                    for NS_record in relevant_NS_records:
-                        response.add_auth(NS_record)
-                    for A_record in relevant_A_records:
-                        response.add_ar(A_record)
-                    #Add CNAMe record search but with glue
-                    for CNAME_record in relevant_CNAME_records:
-                        response = self.recursive_cname_query(response,CNAME_record,True)
-                else: #If there are no relevant NS records for this A record query
-                    if len(relevant_A_records) > 0: #If there are relevant A records for this A record query
-                        for A_record in relevant_A_records:
-                            response.add_answer(A_record)
-                        #add own NS records, NOT relevant NS records, it is optional but prolly do it later
-                    #Also search for CNAMe record search
-                    elif len(relevant_CNAME_records) > 0:
-                        for CNAME_record in relevant_CNAME_records:
-                            response = self.recursive_cname_query(response,CNAME_record,False)
-                    else:#We have found no relevant NS record or A records for this A record query
-                        response.header.rcode = 3 #NXDOMAIN No A records exist for the domain, but we are authoritative so we return NXDOMAIN
+                if rel_NS:
+                    for r in rel_NS:
+                        response.add_auth(r)
+                    for r in rel_A:
+                        response.add_ar(r)
+                    for r in rel_CN:
+                        response = self.recursive_cname_query(response, r, True)
+                else:
+                    if rel_A:
+                        for r in rel_A:
+                            response.add_answer(r)
+                    elif rel_CN:
+                        for r in rel_CN:
+                            response = self.recursive_cname_query(response, r, False)
+                    else:
+                        response.header.rcode = 3  # NXDOMAIN
             elif qtype == RecordType.MX.value:
-                for MX_record in relevant_MX_records:
-                    response.add_answer(MX_record)
+                for r in rel_MX:
+                    response.add_answer(r)
             elif qtype == RecordType.TXT.value:
-                for TXT_record in relevant_TXT_records:
-                    response.add_answer(TXT_record)
+                for r in rel_TX:
+                    response.add_answer(r)
+
         elif is_local:
-            #self.handle_dns_lookup()
-            #forward the request to the root server and return the response
+            if not request.header.rd:
+                response.header.rcode = 2  # SERVFAIL
+                return response
+
+            fresh = self.get_fresh_records((str(qname), int(qtype)))
+            if fresh:
+                response.header.ra = 1
+                response.header.aa = 0
+                if isinstance(fresh[-1], list):
+                    for r in fresh[-1]:
+                        response.add_ar(r)
+                    fresh.pop()
+                for r in fresh:
+                    response.add_answer(r)
+                return response
+
+            self.handle_dns_lookup(request, (incoming_ip, incoming_port))
             response = None
-            pass
         else:
-            response.header.rcode = 5 #REFUSED
-            pass
+            response.header.rcode = 5  # REFUSED
+
         return response
-    
-    #This function STARTS the action to create a temp socket for a specific portion of the requested domain name and add it to the temp socket list
-    #Does not return anything by itself
-    #
-    def handle_dns_lookup(self,domain_name):
+
+    def handle_dns_lookup(self, request, client_addr):
         temp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        question_dns_record = DNSRecord(q=DNSQuestion("google.com", QTYPE.A)) #change this to do smthn with domain_name
-        self.send_request((self.root_ip,60053),question_dns_record,temp_socket)
-    
-    #addr_tuple should usually be (self.root_ip,60053)
-    #Sends the actual request and appends the temp socket to the socket list
-    def send_request(self,addr_tuple,dns_record,target_socket):
-        self.send(addr_tuple,dns_record,target_socket)
-        self.temp_sockets.append(target_socket)
-    
-    #This function should be called a lot in the run() function to constantly check the temp socket list to see if any of the sockets have reponses
-    #if they do, try to resolve them to their immediate NS or A records.
-    #If they are A records, figure out how to send them to our client through self.socket
-    #If they are NS records, call handle_dns_lookup and append into temp socket list to resolve the NEXT step of the domain name.
-    def resolve_temp_socket(self):
-        pass
+        client_q = request.questions[0]
+        # current_question is what we send upstream (may change during resolution)
+        current_question = DNSRecord(q=DNSQuestion(client_q.qname, client_q.qtype))
+        self.socket_to_port_tracker[temp_socket] = {
+            "client_ip":        client_addr[0],
+            "client_port":      client_addr[1],
+            "request_object":   request,          # original client request, never changes
+            "current_question": current_question, # what we're currently asking upstream
+            "ns_list":          [self.root_ip],
+            "ns_index":         0,
+            "CNAME_chain":      [],
+            "last_send_time":   time.time(),
+            "retry_count":      0,
+        }
+        self._send_upstream(temp_socket, self.root_ip, current_question)
+
+    def _send_upstream(self, temp_socket, ns_ip, question):
+        """Send question to ns_ip and update bookkeeping."""
+        self.send((ns_ip, 60053), question, temp_socket)
+        tracker = self.socket_to_port_tracker[temp_socket]
+        tracker["last_send_time"] = time.time()
+        tracker["current_question"] = question
+        if temp_socket not in self.temp_sockets:
+            self.temp_sockets.append(temp_socket)
+
+    def is_in_bailiwick(self, record_name, server_domain):
+        rname   = str(record_name).rstrip(".")
+        sdomain = str(server_domain).rstrip(".")
+        if not sdomain:
+            return True  # root
+        return rname == sdomain or rname.endswith("." + sdomain)
+
+    def cleanup_temp_socket(self, temp_socket):
+        if temp_socket in self.temp_sockets:
+            self.temp_sockets.remove(temp_socket)
+        if temp_socket in self.socket_to_port_tracker:
+            del self.socket_to_port_tracker[temp_socket]
+        try:
+            temp_socket.close()
+        except Exception:
+            pass
+
+    def get_record_by_name(self, target_name, records):
+        for r in records:
+            if r.rname == target_name:
+                return r
+        return None
+
+    def get_cname_chain_only(self, records):
+        if not any(r.rtype == RecordType.CNAME.value for r in records):
+            return []
+        if len(records) == 1:
+            return records
+
+        # build name->record lookup using normalized string keys
+        by_name = {}
+        for r in records:
+            by_name[str(r.rname).rstrip(".")] = r
+            
+        #find all names that are CNAME targets
+        pointed_to = set()
+        for r in records:
+            if r.rtype == RecordType.CNAME.value:
+                pointed_to.add(str(r.rdata).rstrip("."))
+
+        # chain head: a CNAME record whose rname is NOT pointed to by anyone
+        head = None
+        for r in records:
+            if r.rtype == RecordType.CNAME.value:
+                if str(r.rname).rstrip(".") not in pointed_to:
+                    head = r
+                    break
+
+        if head is None:
+            # fallback, just return first CNAME
+            for r in records:
+                if r.rtype == RecordType.CNAME.value:
+                    return [r]
+            return []
+
+        chain = []
+        current = head
+        seen = set()
+        while current is not None:
+            chain.append(current)
+            next_name = str(current.rdata).rstrip(".")
+            if next_name in seen:
+                break  # loop guard
+            seen.add(next_name)
+            current = by_name.get(next_name)
+        return chain
+
+    def _cache_key(self, rname, rtype):
+        return (str(rname).rstrip(".").lower(), int(rtype))
+
+    def cache_record(self, target_record):
+        if target_record.ttl <= 0:
+            return  #do not cache
+        key = self._cache_key(target_record.rname, target_record.rtype)
+        lst = self.cache.get(key, [])
+        for e in lst:
+            if str(e["record"].rdata) == str(target_record.rdata):
+                return
+        lst.append({"record": target_record, "timestamp": time.time()})
+        self.cache[key] = lst
+
+    def get_fresh_records(self, record_key):
+        norm_key = self._cache_key(record_key[0], record_key[1])
+        if norm_key not in self.cache:
+            return []
+        now = time.time()
+        fresh = [e for e in self.cache[norm_key] if (now - e["timestamp"]) < e["record"].ttl]
+        self.cache[norm_key] = fresh
+        if not fresh:
+            del self.cache[norm_key]
+            return []
+        records = [e["record"] for e in fresh]
+        if int(record_key[1]) == RecordType.NS.value:
+            additional = []
+            for r in records:
+                a_fresh = self.get_fresh_records((str(r.rdata).rstrip("."), RecordType.A.value))
+                if a_fresh:
+                    additional += a_fresh
+            records.append(additional)
+        return records
+
+    def send_to_client(self, temp_socket, response):
+        t = self.socket_to_port_tracker[temp_socket]
+        self.send((t["client_ip"], t["client_port"]), response, self.socket)
+
+    def start_ns_resolution(self, parent_socket, ns_label):
+        """Resolve an NS hostname to an IP, then resume the parent lookup."""
+        ns_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        question = DNSRecord(q=DNSQuestion(ns_label, RecordType.A.value))
+        self.socket_to_port_tracker[ns_socket] = {
+            "client_ip":           None,
+            "client_port":         None,
+            "request_object":      question,
+            "current_question":    question,
+            "ns_list":             [self.root_ip],
+            "ns_index":            0,
+            "CNAME_chain":         [],
+            "last_send_time":      time.time(),
+            "retry_count":         0,
+            "resolve_for_socket":  parent_socket,
+        }
+        self._send_upstream(ns_socket, self.root_ip, question)
+
+    def _get_bailiwick(self, response):
+        """Use auth section NS/SOA rname as bailiwick; fall back to question qname."""
+        for rec in response.auth:
+            if rec.rtype in (RecordType.NS.value, RecordType.SOA.value):
+                return str(rec.rname).rstrip(".")
+        return str(response.questions[0].qname).rstrip(".") if response.questions else ""
+
+    def process_socket_response(self, temp_socket):
+        data, addr = temp_socket.recvfrom(65535)
+        try:
+            response = DNSRecord.parse(data)
+        except Exception as e:
+            self.log("Malformed upstream packet, ignoring: %s" % e)
+            return
+
+        if temp_socket not in self.socket_to_port_tracker:
+            return  # already cleaned up (e.g. duplicate response after timeout)
+
+        tracker = self.socket_to_port_tracker[temp_socket]
+        tracker["retry_count"] = 0
+
+        answer_section     = response.rr
+        authority_section  = response.auth
+        additional_section = response.ar
+        print("Response:", response)
+
+        bailiwick = self._get_bailiwick(response)
+
+        # ── ANSWER SECTION ───────────────────────────────────────────────────
+        if answer_section:
+
+            #cache everything in-bailiwick
+            if response.questions and response.questions[0].qtype == RecordType.NS.value:
+                found_ns = None
+                for rec in answer_section:
+                    if rec.rname == response.questions[0].qname:
+                        self.cache_record(rec)
+                        found_ns = rec
+                        break
+                if found_ns:
+                    for rec in additional_section:
+                        if self.is_in_bailiwick(rec.rname, bailiwick):
+                            self.cache_record(rec)
+            else:
+                qname_str = str(response.questions[0].qname).rstrip(".") if response.questions else ""
+                for rec in answer_section:
+                    # acept if in bailiwick OR if rname matches the queried name exactly
+                    # (handles CNAME chains where target may be outside bailiwick)
+                    rname_str = str(rec.rname).rstrip(".")
+                    if self.is_in_bailiwick(rec.rname, bailiwick) or rname_str == qname_str:
+                        self.cache_record(rec)
+                for rec in additional_section:
+                    if self.is_in_bailiwick(rec.rname, bailiwick):
+                        self.cache_record(rec)
+
+            #sub-resolution (resolve NS hostname for parent lookup)
+            if "resolve_for_socket" in tracker:
+                parent_socket = tracker["resolve_for_socket"]
+                if parent_socket in self.socket_to_port_tracker:
+                    resolved_ip = None
+                    for rec in answer_section:
+                        if rec.rtype == RecordType.A.value:
+                            resolved_ip = str(rec.rdata)
+                            break
+                    if resolved_ip:
+                        pt = self.socket_to_port_tracker[parent_socket]
+                        pt["ns_list"].append(resolved_ip)
+                        pt["ns_index"] = len(pt["ns_list"]) - 1
+                        self._send_upstream(parent_socket, resolved_ip, pt["current_question"])
+                    else:
+                        orig = self.socket_to_port_tracker[parent_socket]["request_object"]
+                        err = orig.reply()
+                        err.header.rcode = 2
+                        err.header.ra = 1
+                        self.send_to_client(parent_socket, err)
+                        self.cleanup_temp_socket(parent_socket)
+                self.cleanup_temp_socket(temp_socket)
+                return
+
+            # CNAME chain handling
+            CNAME_chain = self.get_cname_chain_only(answer_section)
+            if CNAME_chain:
+                existing       = tracker["CNAME_chain"]
+                existing_names = {str(r.rname) for r in existing}
+                tracker["CNAME_chain"] = existing + [r for r in CNAME_chain if str(r.rname) not in existing_names]
+
+                if CNAME_chain[-1].rtype == RecordType.A.value:
+                    sub = tracker["request_object"].reply()
+                    sub.header.aa = 0
+                    sub.header.ra = 1
+                    sub.header.tc = 0
+                    for r in tracker["CNAME_chain"]:
+                        sub.add_answer(r)
+                    self.send_to_client(temp_socket, sub)
+                    self.cleanup_temp_socket(temp_socket)
+                    return
+                elif CNAME_chain[-1].rtype == RecordType.CNAME.value:
+                    # restart resolution from root for CNAME target
+                    tracker["ns_list"]  = [self.root_ip]
+                    tracker["ns_index"] = 0
+                    new_q = DNSRecord(q=DNSQuestion(CNAME_chain[-1].rdata.label,
+                                                    tracker["request_object"].q.qtype))
+                    self._send_upstream(temp_socket, self.root_ip, new_q)
+                    return
+
+            orig_qname   = str(tracker["request_object"].questions[0].qname).rstrip(".")
+            cname_chain  = tracker["CNAME_chain"]
+            cname_names  = {str(r.rname).rstrip(".") for r in cname_chain}
+            cname_names.add(orig_qname)
+            new_answers  = list(cname_chain)
+            for rec in answer_section:
+                rname_str = str(rec.rname).rstrip(".")
+                # Only records relevant to the original query or CNAME chain
+                if rec not in new_answers and (
+                    rname_str == orig_qname or
+                    rname_str in cname_names or
+                    self.is_in_bailiwick(rec.rname, bailiwick)
+                ):
+                    new_answers.append(rec)
+            response.rr          = new_answers
+            response.header.aa   = 0
+            response.header.ra   = 1
+            response.header.tc   = 0  # never forward truncated flag
+            response.header.id   = tracker["request_object"].header.id
+            self.send_to_client(temp_socket, response)
+            self.cleanup_temp_socket(temp_socket)
+
+        # ── AUTHORITY SECTION ────────────────────────────────────────────────
+        elif authority_section:
+            original_request = tracker["request_object"]
+            ns_list          = tracker["ns_list"]
+
+            # If the client wanted NS records and authority has the exact name, return it
+            if original_request.questions[0].qtype == RecordType.NS.value:
+                for rec in authority_section:
+                    if rec.rname == response.questions[0].qname:
+                        self.cache_record(rec)
+                        for ar in additional_section:
+                            if self.is_in_bailiwick(ar.rname, bailiwick):
+                                self.cache_record(ar)
+                        response.header.aa  = 0
+                        response.header.ra  = 1
+                        response.header.id  = tracker["request_object"].header.id
+                        self.send_to_client(temp_socket, response)
+                        self.cleanup_temp_socket(temp_socket)
+                        return
+
+            #collect bailiwick-valid NS records from authority
+            authority_ns = []
+            for rec in authority_section:
+                if rec.rtype == RecordType.NS.value and self.is_in_bailiwick(rec.rname, bailiwick):
+                    authority_ns.append(rec)
+                    self.cache_record(rec)
+
+            # extract glue IPs from additional cache all, use first found
+            glue_ip = None
+            for ns_rec in authority_ns:
+                ns_target = str(ns_rec.rdata).strip(".")
+                for ar in additional_section:
+                    if not self.is_in_bailiwick(ar.rname, bailiwick):
+                        continue
+                    if str(ar.rname).strip(".") == ns_target and ar.rtype == RecordType.A.value:
+                        self.cache_record(ar)
+                        if glue_ip is None:
+                            glue_ip = str(ar.rdata)
+
+            if glue_ip:
+                ns_list.append(glue_ip)
+                tracker["ns_index"] = len(ns_list) - 1
+                self._send_upstream(temp_socket, glue_ip, tracker["current_question"])
+            elif authority_ns:
+                ns_label  = authority_ns[0].rdata.label
+                cached_a  = self.get_fresh_records((ns_label, RecordType.A.value))
+                if cached_a and isinstance(cached_a[-1], list):
+                    cached_a = cached_a[:-1]
+                if cached_a:
+                    ip = str(cached_a[0].rdata)
+                    ns_list.append(ip)
+                    tracker["ns_index"] = len(ns_list) - 1
+                    self._send_upstream(temp_socket, ip, tracker["current_question"])
+                else:
+                    self.start_ns_resolution(temp_socket, ns_label)
+            else:
+                err = original_request.reply()
+                err.header.rcode = 2  # SERVFAIL
+                err.header.ra    = 1
+                self.send_to_client(temp_socket, err)
+                self.cleanup_temp_socket(temp_socket)
+
+        # ── EMPTY RESPONSE ───────────────────────────────────────────────────
+        else:
+            response.header.aa  = 0
+            response.header.ra  = 1
+            response.header.id  = tracker["request_object"].header.id
+            response.ar         = []
+            self.send_to_client(temp_socket, response)
+            self.cleanup_temp_socket(temp_socket)
+
+    def check_timeouts(self):
+        """Retry or give up on stalled upstream sockets."""
+        now  = time.time()
+        dead = []
+        for sock, tracker in list(self.socket_to_port_tracker.items()):
+            if (now - tracker["last_send_time"]) <= TIMEOUT:
+                continue
+            ns_list  = tracker["ns_list"]
+            ns_index = tracker["ns_index"]
+            question = tracker["current_question"]
+
+            if tracker["retry_count"] < MAX_RETRIES:
+                tracker["retry_count"]    += 1
+                tracker["last_send_time"]  = now
+                self.log("Timeout retry %d -> %s" % (tracker["retry_count"], ns_list[ns_index]))
+                try:
+                    sock.sendto(question.pack(), (ns_list[ns_index], 60053))
+                except Exception:
+                    dead.append(sock)
+            elif ns_index + 1 < len(ns_list):
+                tracker["ns_index"]       += 1
+                tracker["retry_count"]     = 0
+                tracker["last_send_time"]  = now
+                next_ip = ns_list[tracker["ns_index"]]
+                self.log("Timeout, next NS: %s" % next_ip)
+                try:
+                    sock.sendto(question.pack(), (next_ip, 60053))
+                except Exception:
+                    dead.append(sock)
+            else:
+                self.log("All NS servers timed out, SERVFAIL")
+                if tracker.get("client_ip"):
+                    try:
+                        err = tracker["request_object"].reply()
+                        err.header.rcode = 2  # SERVFAIL
+                        err.header.ra    = 1
+                        self.socket.sendto(err.pack(), (tracker["client_ip"], tracker["client_port"]))
+                    except Exception:
+                        pass
+                dead.append(sock)
+
+        for sock in dead:
+            self.cleanup_temp_socket(sock)
 
     def run(self):
-        seq = 0
-
         while True:
-            socks = select.select([self.socket], [], [], 0.1)[0]
+            socks = select.select([self.socket] + self.temp_sockets, [], [], 0.1)[0]
             for conn in socks:
-                self.recv(conn)
-
-        return
+                if conn == self.socket:
+                    self.recv(conn)
+                else:
+                    self.process_socket_response(conn)
+            self.check_timeouts()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='send data')
