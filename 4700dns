@@ -167,12 +167,22 @@ class Server:
                     response.add_answer(TXT_record)
         elif is_local:
             cache_key = (qname,qtype)
+            
+            #print("fresh records tuple:",fresh_records_tuple)
             fresh_records = self.get_fresh_records(cache_key)
+            print("fresh_records:", fresh_records)
+            
             if len(fresh_records) > 0:
                 response.header.ra = 1
-                response.header.aa = 0
+                response.header.aa = 0             
+                if isinstance(fresh_records[-1],list):
+                    
+                    for record in fresh_records[-1]:
+                        response.add_ar(record)
+                    fresh_records.pop()
                 for record in fresh_records:
                     response.add_answer(record)
+                
                 return response
             self.handle_dns_lookup(request,(incoming_ip,incoming_port))
             #forward the request to the root server and return the response
@@ -272,6 +282,7 @@ class Server:
         }
         current_list.append(entry)
         self.cache[(target_record.rname,target_record.rtype)] = current_list
+        print("cache:",self.cache)
     
     def get_fresh_records(self, record_key):
         if record_key not in self.cache:
@@ -284,14 +295,29 @@ class Server:
             if (now - entry["timestamp"]) < entry["record"].ttl
         ]
         
-        # Update the cache with only the survivors
+        #Update the cache with only the survivors
         self.cache[record_key] = fresh_entries
-        if (len(fresh_entries)) == 0:
+        if (len(fresh_entries)) == 0: #Remove dictionary entry if no survivors left
             del self.cache[record_key]
             return []
+        fresh_records = [e["record"] for e in fresh_entries]
+        
+        qtype = record_key[1]
+        if qtype == RecordType.NS.value:
+            fresh_additional_records = []
+            print("fresh_records len:",len(fresh_records))
+            for record in fresh_records:
+                print("iterate record:",record)
+                A_record_key = (record.rname,RecordType.A.value)
+                current_fresh_additional_records = self.get_fresh_records(A_record_key)
+                if len(current_fresh_additional_records) > 0:
+                    fresh_additional_records += current_fresh_additional_records
+            fresh_records.append(fresh_additional_records)
+            
+            return fresh_records
         
         # Return just the RR objects for the DNS response
-        return [e["record"] for e in fresh_entries]
+        return fresh_records
     #This function should be called a lot in the run() function to constantly check the temp socket list to see if any of the sockets have reponses
     #if they do, try to resolve them to their immediate NS or A records.
     #If they are A records, figure out how to send them to our client through self.socket
@@ -306,18 +332,31 @@ class Server:
         answer_section = response.rr
         authority_section = response.auth
         additional_section = response.ar
+        print("Response:",response)
         
         
 
         if len(answer_section) > 0: #Has immediate ip addr! Check it and send it back to the client.
             print("answer section:",answer_section)
             print("cname chain:",self.get_cname_chain_only(answer_section))
+            found_ns_record = None
+            if response.questions[0].qtype == RecordType.NS.value:
+                for record in answer_section:
+                        if record.rname == response.questions[0].qname:
+                            self.cache_record(record)
+                            found_ns_record = record
+                            break
+                for record in additional_section:
+                    if record.rname == found_ns_record.rdata.label:
+                        self.cache_record(record)
+            else:
+                for record in answer_section:
+                    self.cache_record(record)
 
             #tracker = self.socket_to_port_tracker[temp_socket]
             #original_qname = self.socket_to_port_tracker[temp_socket]["request_object"].q.qname
             #original_qtype = self.socket_to_port_tracker[temp_socket]["request_object"].q.qtype
-            for record in answer_section:
-                self.cache_record(record)
+            
 
             CNAME_chain = self.get_cname_chain_only(answer_section)
             if len(CNAME_chain) > 0: #CNAME CHAIN exists
@@ -373,13 +412,25 @@ class Server:
             
             
             if original_request_object.questions[0].qtype == RecordType.NS.value: #NS records exist in authority and we want NS records
+
+                #print("AUTHORITY SECTION:",authority_section)
                 requested_ns_record_found = False
                 for record in authority_section:
                     if record.rname == response.questions[0].qname:
                         requested_ns_record_found = True
+                        print("requested found")
                         break
 
                 if requested_ns_record_found:
+                    found_ns_record = None
+                    for record in authority_section:
+                        if record.rname == response.questions[0].qname:
+                            self.cache_record(record)
+                            found_ns_record = record
+                            break
+                    for record in additional_section:
+                        if record.rname == found_ns_record.rdata:
+                            self.cache_record(record)
                     
                     response.header.aa = 0
                     response.header.ra = 1
